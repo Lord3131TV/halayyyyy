@@ -1,0 +1,9 @@
+services:
+  - type: web
+    name: kick-halay-overlay
+    runtime: static
+    branch: main
+    buildCommand: ""
+    staticPublishPath: .
+    # Bu dosya ile Render Blueprint kullanabilirsin.
+    # Dashboard'da New → Blueprint → bu repo'yu seç.

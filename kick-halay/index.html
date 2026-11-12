@@ -1,0 +1,777 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Kick Halay - Community Overlay</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body {
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: transparent !important;
+      font-family: 'Segoe UI', system-ui, sans-serif;
+    }
+    #game-canvas {
+      display: block;
+      width: 100%;
+      height: 100%;
+      background: transparent;
+    }
+    #ui-panel {
+      position: fixed;
+      top: 12px;
+      left: 12px;
+      z-index: 100;
+      background: rgba(0, 0, 0, 0.75);
+      color: #fff;
+      padding: 12px 16px;
+      border-radius: 10px;
+      font-size: 13px;
+      max-width: 320px;
+      backdrop-filter: blur(6px);
+      border: 1px solid rgba(255,255,255,0.15);
+      transition: opacity 0.3s;
+    }
+    #ui-panel.hidden { opacity: 0; pointer-events: none; }
+    #ui-panel h3 { margin-bottom: 8px; font-size: 15px; color: #ff6b6b; }
+    #ui-panel label { display: block; margin-top: 8px; margin-bottom: 4px; opacity: 0.85; }
+    #ui-panel input[type="text"] {
+      width: 100%;
+      padding: 6px 10px;
+      border-radius: 6px;
+      border: 1px solid #444;
+      background: #1a1a1a;
+      color: #fff;
+      font-size: 13px;
+    }
+    #ui-panel button {
+      margin-top: 10px;
+      margin-right: 6px;
+      padding: 7px 14px;
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+      font-weight: 600;
+      font-size: 13px;
+    }
+    #btn-connect { background: #00e701; color: #000; }
+    #btn-demo { background: #4ecdc4; color: #000; }
+    #btn-hide { background: #666; color: #fff; }
+    #status {
+      margin-top: 10px;
+      font-size: 12px;
+      opacity: 0.9;
+    }
+    #status.ok { color: #00e701; }
+    #status.err { color: #ff6b6b; }
+    #status.warn { color: #ffd166; }
+    #player-count {
+      position: fixed;
+      bottom: 12px;
+      right: 12px;
+      background: rgba(0,0,0,0.6);
+      color: #fff;
+      padding: 6px 12px;
+      border-radius: 20px;
+      font-size: 13px;
+      z-index: 50;
+      pointer-events: none;
+    }
+    .hint {
+      font-size: 11px;
+      opacity: 0.7;
+      margin-top: 6px;
+      line-height: 1.4;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="game-canvas"></canvas>
+
+  <div id="ui-panel">
+    <h3>🕺 Kick Halay</h3>
+    <label>Kick kanalı (slug)</label>
+    <input type="text" id="channel-input" placeholder="ornek: xqc" value="" />
+    <div>
+      <button id="btn-connect">Bağlan</button>
+      <button id="btn-demo">Demo Modu</button>
+      <button id="btn-hide">Paneli Gizle</button>
+    </div>
+    <label style="margin-top:12px">Manuel oyuncu ekle</label>
+    <div style="display:flex;gap:6px;margin-top:4px;align-items:center">
+      <input type="text" id="manual-name" placeholder="kullanıcı adı" style="flex:1;margin:0" />
+      <button id="btn-add" style="background:#ff6b6b;color:#fff;margin-top:0;padding:7px 12px">Ekle</button>
+    </div>
+    <div id="status">Hazır. Demo veya Manuel Ekle kullan.</div>
+    <div class="hint">
+      Kick bağlanmıyorsa <b>Demo</b> veya <b>Manuel Ekle</b> kullan.<br>
+      Komutlar: <b>!katıl</b> / <b>!ayrıl</b> &nbsp;|&nbsp; <b>H</b> = paneli gizle<br>
+      Karakterler asla ekran dışına çıkmaz.
+    </div>
+  </div>
+
+  <div id="player-count">Oyuncu: 0</div>
+
+  <script>
+    // ============================================================
+    // KICK HALAY - Full working overlay game
+    // ============================================================
+
+    const canvas = document.getElementById('game-canvas');
+    const ctx = canvas.getContext('2d');
+    const statusEl = document.getElementById('status');
+    const playerCountEl = document.getElementById('player-count');
+    const uiPanel = document.getElementById('ui-panel');
+
+    // ---------- State ----------
+    let players = new Map(); // username -> Player
+    let animationTime = 0;
+    let lastFrame = performance.now();
+    let kickWs = null;
+    let chatroomId = null;
+    let channelSlug = '';
+    let isDemo = false;
+    let demoInterval = null;
+
+    // Character visual constants (will scale)
+    const BASE_CHAR_W = 48;
+    const BASE_CHAR_H = 72;
+    const MIN_CHAR_SCALE = 0.35;
+    const MAX_CHAR_SCALE = 1.15;
+    const PADDING = 28; // screen edge padding
+
+    // Colors for variety (Turkish folk inspired + fun)
+    const PALETTE = [
+      { body: '#e63946', pants: '#1d3557', accent: '#f1faee' },
+      { body: '#2a9d8f', pants: '#264653', accent: '#e9c46a' },
+      { body: '#e76f51', pants: '#264653', accent: '#f4a261' },
+      { body: '#457b9d', pants: '#1d3557', accent: '#a8dadc' },
+      { body: '#9b5de5', pants: '#3a0ca3', accent: '#f15bb5' },
+      { body: '#00bbf9', pants: '#005f73', accent: '#90e0ef' },
+      { body: '#f15bb5', pants: '#9b5de5', accent: '#fee440' },
+      { body: '#00f5d4', pants: '#0077b6', accent: '#80ed99' },
+    ];
+
+    class Player {
+      constructor(username) {
+        this.username = username;
+        this.color = PALETTE[Math.floor(Math.random() * PALETTE.length)];
+        this.joinTime = Date.now();
+        this.angleOffset = Math.random() * Math.PI * 2; // slight phase variety
+        this.targetX = 0;
+        this.targetY = 0;
+        this.x = 0;
+        this.y = 0;
+        this.scale = 1;
+        this.facing = 1; // 1 or -1
+      }
+    }
+
+    // ---------- Canvas & Layout ----------
+    function resize() {
+      canvas.width = window.innerWidth;
+      canvas.height = window.innerHeight;
+      layoutCircle();
+    }
+
+    function layoutCircle() {
+      const n = players.size;
+      if (n === 0) return;
+
+      const w = canvas.width;
+      const h = canvas.height;
+      const cx = w / 2;
+      const cy = h / 2;
+
+      // Available space (with padding)
+      const availW = Math.max(100, w - PADDING * 2);
+      const availH = Math.max(100, h - PADDING * 2);
+      const maxDiameter = Math.min(availW, availH);
+
+      // Desired spacing between characters (along circumference)
+      // Scale characters down when many players
+      let charScale = MAX_CHAR_SCALE;
+      if (n > 12) charScale = Math.max(MIN_CHAR_SCALE, MAX_CHAR_SCALE - (n - 12) * 0.025);
+      if (n > 40) charScale = MIN_CHAR_SCALE;
+
+      const charW = BASE_CHAR_W * charScale;
+      const charH = BASE_CHAR_H * charScale;
+
+      // Radius so that characters sit on the circle and stay inside screen
+      // We reserve half character size + a bit of breathing room
+      const minRadiusForFit = (maxDiameter / 2) - (charH * 0.55);
+      // Also consider circumferential spacing: 2 * pi * r / n >= charW * 1.1
+      const minRadiusForSpacing = (n * charW * 1.15) / (2 * Math.PI);
+
+      let radius = Math.min(minRadiusForFit, Math.max(minRadiusForSpacing, 80));
+      // Final clamp so nothing goes outside
+      radius = Math.min(radius, minRadiusForFit);
+      radius = Math.max(radius, 40);
+
+      // Apply
+      let i = 0;
+      for (const p of players.values()) {
+        const angle = (i / n) * Math.PI * 2 - Math.PI / 2; // start from top
+        p.targetX = cx + Math.cos(angle) * radius;
+        p.targetY = cy + Math.sin(angle) * radius;
+        p.scale = charScale;
+        p.facing = Math.cos(angle) > 0 ? 1 : -1;
+        // Smooth lerp on first frames
+        if (p.x === 0 && p.y === 0) {
+          p.x = p.targetX;
+          p.y = p.targetY;
+        }
+        i++;
+      }
+    }
+
+    // ---------- Animation ----------
+    function update(dt) {
+      animationTime += dt;
+      for (const p of players.values()) {
+        // Smooth position
+        p.x += (p.targetX - p.x) * Math.min(1, dt * 4);
+        p.y += (p.targetY - p.y) * Math.min(1, dt * 4);
+      }
+    }
+
+    function drawCharacter(p, t) {
+      const s = p.scale;
+      const x = p.x;
+      const y = p.y;
+
+      // Synchronized dance
+      const beat = t * 2.8; // overall tempo
+      const step = Math.sin(beat + p.angleOffset) * 6 * s; // left-right
+      const bounce = Math.abs(Math.sin(beat * 1.5 + p.angleOffset * 0.7)) * 8 * s; // jump
+      const armSwing = Math.sin(beat * 1.2) * 0.6;
+
+      ctx.save();
+      ctx.translate(x + step, y - bounce);
+      ctx.scale(p.facing, 1);
+
+      // Shadow
+      ctx.beginPath();
+      ctx.ellipse(0, 28 * s, 16 * s, 5 * s, 0, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(0,0,0,0.25)';
+      ctx.fill();
+
+      // Legs (dancing)
+      const legSpread = Math.sin(beat) * 8 * s;
+      ctx.strokeStyle = p.color.pants;
+      ctx.lineWidth = 5 * s;
+      ctx.lineCap = 'round';
+      // left leg
+      ctx.beginPath();
+      ctx.moveTo(-4 * s, 8 * s);
+      ctx.lineTo(-8 * s - legSpread, 26 * s);
+      ctx.stroke();
+      // right leg
+      ctx.beginPath();
+      ctx.moveTo(4 * s, 8 * s);
+      ctx.lineTo(8 * s + legSpread, 26 * s);
+      ctx.stroke();
+
+      // Body
+      ctx.fillStyle = p.color.body;
+      ctx.beginPath();
+      ctx.roundRect(-10 * s, -18 * s, 20 * s, 28 * s, 6 * s);
+      ctx.fill();
+
+      // Arms (halay style - linked feeling)
+      ctx.strokeStyle = p.color.body;
+      ctx.lineWidth = 4.5 * s;
+      // left arm
+      ctx.beginPath();
+      ctx.moveTo(-10 * s, -8 * s);
+      ctx.quadraticCurveTo(-22 * s, -4 * s + armSwing * 10 * s, -18 * s, 10 * s);
+      ctx.stroke();
+      // right arm
+      ctx.beginPath();
+      ctx.moveTo(10 * s, -8 * s);
+      ctx.quadraticCurveTo(22 * s, -4 * s - armSwing * 10 * s, 18 * s, 10 * s);
+      ctx.stroke();
+
+      // Head
+      ctx.fillStyle = '#fceadd';
+      ctx.beginPath();
+      ctx.arc(0, -28 * s, 11 * s, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Simple face
+      ctx.fillStyle = '#333';
+      ctx.beginPath();
+      ctx.arc(-4 * s, -30 * s, 1.8 * s, 0, Math.PI * 2);
+      ctx.arc(4 * s, -30 * s, 1.8 * s, 0, Math.PI * 2);
+      ctx.fill();
+      // smile
+      ctx.beginPath();
+      ctx.arc(0, -26 * s, 4 * s, 0.15, Math.PI - 0.15);
+      ctx.strokeStyle = '#333';
+      ctx.lineWidth = 1.5 * s;
+      ctx.stroke();
+
+      // Accent (scarf / belt)
+      ctx.fillStyle = p.color.accent;
+      ctx.fillRect(-10 * s, -2 * s, 20 * s, 4 * s);
+
+      // Username
+      ctx.scale(p.facing, 1); // reset flip for text
+      ctx.font = `bold ${Math.max(11, 13 * s)}px system-ui, sans-serif`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'bottom';
+      // outline for readability
+      ctx.lineWidth = 3;
+      ctx.strokeStyle = 'rgba(0,0,0,0.7)';
+      ctx.strokeText(p.username, 0, -42 * s);
+      ctx.fillStyle = '#ffffff';
+      ctx.fillText(p.username, 0, -42 * s);
+
+      ctx.restore();
+    }
+
+    function render() {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+      // Optional subtle ground circle (very light)
+      if (players.size > 0) {
+        const first = players.values().next().value;
+        const cx = canvas.width / 2;
+        const cy = canvas.height / 2;
+        const r = Math.hypot(first.targetX - cx, first.targetY - cy);
+        ctx.beginPath();
+        ctx.arc(cx, cy, r, 0, Math.PI * 2);
+        ctx.strokeStyle = 'rgba(255,255,255,0.06)';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+      }
+
+      // Draw all characters
+      for (const p of players.values()) {
+        drawCharacter(p, animationTime);
+      }
+
+      playerCountEl.textContent = `Oyuncu: ${players.size}`;
+    }
+
+    function loop(now) {
+      const dt = Math.min(0.05, (now - lastFrame) / 1000);
+      lastFrame = now;
+      update(dt);
+      render();
+      requestAnimationFrame(loop);
+    }
+
+    // ---------- Player management ----------
+    function addPlayer(username) {
+      if (!username) return;
+      const key = username.toLowerCase();
+      if (players.has(key)) return;
+      if (players.size >= 80) return; // hard safety
+      players.set(key, new Player(username));
+      layoutCircle();
+    }
+
+    function removePlayer(username) {
+      const key = username.toLowerCase();
+      if (players.delete(key)) {
+        layoutCircle();
+      }
+    }
+
+    // ---------- Kick Chat Integration (Pusher - dinamik key) ----------
+    // Kick Ekim 2026'da Centrifugo'ya geçti; eski sabit Pusher key'leri öldü.
+    // Hâlâ Pusher sunuyor: sadece "pusher" provider isteyince güncel app_key verir.
+    // Bu yöntem OBS / tarayıcıdan Origin kısıtı olmadan çalışır.
+    let reconnectTimer = null;
+    let reconnectAttempts = 0;
+    let intentionalClose = false;
+    let pusherAppKey = null;
+    let pusherCluster = 'us2';
+    let seenMessageIds = new Set();
+    const MAX_SEEN_IDS = 400;
+
+    function uuid() {
+      if (crypto && crypto.randomUUID) return crypto.randomUUID();
+      return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
+        const r = Math.random() * 16 | 0;
+        return (c === 'x' ? r : (r & 0x3 | 0x8)).toString(16);
+      });
+    }
+
+    async function resolveChatroomId(slug) {
+      const endpoints = [
+        `https://kick.com/api/v2/channels/${encodeURIComponent(slug)}`,
+        `https://kick.com/api/v1/channels/${encodeURIComponent(slug)}`
+      ];
+      for (const url of endpoints) {
+        try {
+          const res = await fetch(url, {
+            headers: { 'Accept': 'application/json' },
+            mode: 'cors',
+            credentials: 'omit'
+          });
+          if (!res.ok) {
+            console.warn('Channel API', res.status, url);
+            continue;
+          }
+          const data = await res.json();
+          const id = data?.chatroom?.id ?? data?.chatroom_id ?? data?.id;
+          if (id) {
+            console.log('Chatroom ID:', id);
+            return Number(id);
+          }
+        } catch (e) {
+          console.warn('Channel fetch:', e.message);
+        }
+      }
+      return null;
+    }
+
+    async function resolvePusherCredentials() {
+      // Kick'e sadece Pusher kabul ettiğimizi söyle → güncel app_key + cluster döner
+      try {
+        const res = await fetch('https://web.kick.com/api/v1/realtime/connection', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+          mode: 'cors',
+          credentials: 'omit',
+          body: JSON.stringify({
+            client: { id: uuid(), type: 'web' },
+            capabilities: { accepted_providers: [{ provider: 'pusher' }] }
+          })
+        });
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const json = await res.json();
+        const conn = json?.data?.connections?.[0];
+        if (conn?.provider === 'pusher' && conn.credentials?.app_key) {
+          console.log('Pusher key alındı, cluster:', conn.credentials.cluster);
+          return {
+            appKey: conn.credentials.app_key,
+            cluster: conn.credentials.cluster || 'us2'
+          };
+        }
+        throw new Error('Pusher bilgisi gelmedi');
+      } catch (e) {
+        console.warn('Realtime credential hatası:', e.message);
+        // Son bilinen fallback (2026-10 sonrası key)
+        return { appKey: '34bf7a0ff419a2a775b9', cluster: 'us2' };
+      }
+    }
+
+    async function connectKick(slug) {
+      intentionalClose = false;
+      disconnectKick(false);
+      stopDemo();
+      channelSlug = (slug || '').trim().toLowerCase().replace(/^https?:\/\/(www\.)?kick\.com\//, '').split(/[/?#]/)[0];
+      if (!channelSlug) {
+        setStatus('Kanal adı gerekli (örnek: xqc).', 'err');
+        return;
+      }
+
+      setStatus('Kanal ve sohbet bilgisi alınıyor...', 'warn');
+      reconnectAttempts = 0;
+      seenMessageIds.clear();
+
+      try {
+        const [id, creds] = await Promise.all([
+          resolveChatroomId(channelSlug),
+          resolvePusherCredentials()
+        ]);
+
+        if (!id) {
+          setStatus('Kanal bulunamadı: "' + channelSlug + '". Adı kontrol et veya Demo kullan.', 'err');
+          return;
+        }
+
+        chatroomId = id;
+        pusherAppKey = creds.appKey;
+        pusherCluster = creds.cluster || 'us2';
+        openWebSocket();
+      } catch (err) {
+        setStatus('Bağlantı hazırlığı başarısız: ' + (err.message || 'bilinmiyor') + ' — Demo kullan.', 'err');
+      }
+    }
+
+    function openWebSocket() {
+      if (intentionalClose) return;
+      if (!pusherAppKey || !chatroomId) {
+        setStatus('Eksik bilgi (key/chatroom). Tekrar Bağlan.', 'err');
+        return;
+      }
+
+      const wsUrl = `wss://ws-${pusherCluster}.pusher.com/app/${pusherAppKey}?protocol=7&client=js&version=8.4.0-rc2&flash=false`;
+      setStatus(`Kick sohbetine bağlanıyor... (${channelSlug}, deneme ${reconnectAttempts + 1})`, 'warn');
+
+      try {
+        kickWs = new WebSocket(wsUrl);
+      } catch (e) {
+        setStatus('WebSocket açılamadı: ' + e.message, 'err');
+        scheduleReconnect();
+        return;
+      }
+
+      let subscribed = false;
+      let connectTimeout = setTimeout(() => {
+        if (!subscribed && kickWs) {
+          setStatus('Bağlantı zaman aşımı. Yeniden deneniyor...', 'warn');
+          try { kickWs.close(); } catch (_) {}
+        }
+      }, 12000);
+
+      kickWs.onopen = () => {
+        console.log('Pusher WS open');
+      };
+
+      kickWs.onmessage = (ev) => {
+        try {
+          const msg = JSON.parse(ev.data);
+
+          if (msg.event === 'pusher:connection_established') {
+            clearTimeout(connectTimeout);
+            // Ana sohbet kanalı
+            kickWs.send(JSON.stringify({
+              event: 'pusher:subscribe',
+              data: { auth: '', channel: `chatrooms.${chatroomId}.v2` }
+            }));
+            // Yedek kanal adı (eski event isimleri için)
+            kickWs.send(JSON.stringify({
+              event: 'pusher:subscribe',
+              data: { auth: '', channel: `chatrooms.${chatroomId}` }
+            }));
+            subscribed = true;
+            reconnectAttempts = 0;
+            setStatus('✅ Kick kanalına başarıyla bağlandı: ' + channelSlug, 'ok');
+            return;
+          }
+
+          if (msg.event === 'pusher:subscription_succeeded') {
+            console.log('Subscribe OK:', msg.channel || '');
+            return;
+          }
+
+          if (msg.event === 'pusher:ping') {
+            kickWs.send(JSON.stringify({ event: 'pusher:pong', data: {} }));
+            return;
+          }
+
+          if (msg.event === 'pusher:error') {
+            let errData = msg.data;
+            if (typeof errData === 'string') {
+              try { errData = JSON.parse(errData); } catch (_) {}
+            }
+            const code = errData?.code;
+            const message = errData?.message || 'bilinmeyen';
+            console.warn('Pusher error', code, message);
+            if (code === 4001) {
+              // App key geçersiz → key'i yeniden al
+              setStatus('Pusher anahtarı geçersiz, yenileniyor...', 'warn');
+              resolvePusherCredentials().then(c => {
+                pusherAppKey = c.appKey;
+                pusherCluster = c.cluster;
+                scheduleReconnect(500);
+              });
+            } else {
+              setStatus('Pusher hatası (' + code + '): ' + message, 'warn');
+            }
+            return;
+          }
+
+          // Chat mesajı event'leri
+          const eventName = String(msg.event || '').replace(/\\\\/g, '\\');
+          const isChat =
+            eventName.includes('ChatMessage') ||
+            eventName === 'App\\Events\\ChatMessageEvent' ||
+            eventName === 'App\\Events\\ChatMessageSentEvent' ||
+            eventName.endsWith('ChatMessageEvent');
+
+          if (!isChat) return;
+
+          let data = msg.data;
+          if (typeof data === 'string') {
+            try { data = JSON.parse(data); } catch (_) { return; }
+          }
+          if (!data || typeof data !== 'object') return;
+
+          // Aynı mesajı iki kez işleme
+          const msgId = data.id || data.message_id || null;
+          if (msgId) {
+            if (seenMessageIds.has(msgId)) return;
+            seenMessageIds.add(msgId);
+            if (seenMessageIds.size > MAX_SEEN_IDS) {
+              const first = seenMessageIds.values().next().value;
+              seenMessageIds.delete(first);
+            }
+          }
+
+          const content = String(data.content || data.message || '').trim();
+          const user =
+            data.sender?.username ||
+            data.username ||
+            data.user?.username ||
+            data.sender?.slug ||
+            'anon';
+          if (content && user) handleChatCommand(user, content);
+        } catch (e) {
+          // parse hatasını yoksay
+        }
+      };
+
+      kickWs.onerror = () => {
+        console.warn('WS error event');
+      };
+
+      kickWs.onclose = (ev) => {
+        clearTimeout(connectTimeout);
+        console.log('WS closed', ev.code, ev.reason);
+        kickWs = null;
+        if (intentionalClose) return;
+        scheduleReconnect();
+      };
+    }
+
+    function scheduleReconnect(delayMs) {
+      if (intentionalClose) return;
+      reconnectAttempts++;
+      if (reconnectAttempts > 10) {
+        setStatus('Bağlantı sürekli kopuyor. Demo Modu kullan veya kanal adını kontrol et.', 'err');
+        return;
+      }
+      const wait = delayMs != null ? delayMs : Math.min(3000 + reconnectAttempts * 1000, 15000);
+      setStatus(`Bağlantı koptu, ${(wait / 1000).toFixed(0)} sn sonra yeniden... (${reconnectAttempts}/10)`, 'warn');
+      clearTimeout(reconnectTimer);
+      reconnectTimer = setTimeout(() => {
+        // Her 3. denemede key'i yenile
+        if (reconnectAttempts % 3 === 0) {
+          resolvePusherCredentials().then(c => {
+            pusherAppKey = c.appKey;
+            pusherCluster = c.cluster;
+            openWebSocket();
+          }).catch(() => openWebSocket());
+        } else {
+          openWebSocket();
+        }
+      }, wait);
+    }
+
+    function disconnectKick(markIntentional = true) {
+      if (markIntentional) intentionalClose = true;
+      clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+      if (kickWs) {
+        try { kickWs.close(); } catch (_) {}
+        kickWs = null;
+      }
+    }
+
+    function handleChatCommand(username, content) {
+      const lower = content.toLowerCase().trim();
+      // Tam komut eşleşmesi (mesajın tamamı komut olmalı)
+      if (
+        lower === '!katıl' || lower === '!katil' || lower === '!join' ||
+        lower === '!halay' || lower === '!dans'
+      ) {
+        addPlayer(username);
+      } else if (
+        lower === '!ayrıl' || lower === '!ayril' || lower === '!leave' ||
+        lower === '!çık' || lower === '!cik' || lower === '!çıkış' || lower === '!cikis'
+      ) {
+        removePlayer(username);
+      }
+    }
+
+    // ---------- Demo mode ----------
+    function startDemo() {
+      stopDemo();
+      isDemo = true;
+      disconnectKick(true);
+      setStatus('Demo modu aktif. Sahte oyuncular ekleniyor...', 'ok');
+
+      const names = [
+        'Ayşe', 'Mehmet', 'Zeynep', 'Ali', 'Elif', 'Can', 'Selin', 'Emre',
+        'Deniz', 'Burak', 'Ceren', 'Kaan', 'İrem', 'Yusuf', 'Sude', 'Mert',
+        'Ece', 'Onur', 'Nazlı', 'Berk', 'Gizem', 'Tolga', 'Pınar', 'Oğuz'
+      ];
+
+      let idx = 0;
+      // Add a few immediately
+      for (let i = 0; i < 6; i++) {
+        addPlayer(names[idx++ % names.length] + (idx > names.length ? idx : ''));
+      }
+
+      demoInterval = setInterval(() => {
+        if (players.size < 28 && Math.random() > 0.4) {
+          addPlayer(names[idx % names.length] + (Math.floor(idx / names.length) || ''));
+          idx++;
+        } else if (players.size > 8 && Math.random() > 0.7) {
+          const keys = Array.from(players.keys());
+          removePlayer(keys[Math.floor(Math.random() * keys.length)]);
+        }
+      }, 2200);
+    }
+
+    function stopDemo() {
+      isDemo = false;
+      if (demoInterval) {
+        clearInterval(demoInterval);
+        demoInterval = null;
+      }
+    }
+
+    // ---------- UI ----------
+    function setStatus(text, type = '') {
+      statusEl.textContent = text;
+      statusEl.className = type;
+    }
+
+    document.getElementById('btn-connect').addEventListener('click', () => {
+      stopDemo();
+      const slug = document.getElementById('channel-input').value.trim();
+      connectKick(slug);
+    });
+
+    document.getElementById('btn-demo').addEventListener('click', () => {
+      startDemo();
+    });
+
+    document.getElementById('btn-hide').addEventListener('click', () => {
+      uiPanel.classList.add('hidden');
+    });
+
+    // Manuel oyuncu ekle
+    function manualAdd() {
+      const input = document.getElementById('manual-name');
+      const name = (input.value || '').trim();
+      if (!name) return;
+      addPlayer(name);
+      input.value = '';
+      setStatus(`Eklendi: ${name} (toplam ${players.size})`, 'ok');
+    }
+    document.getElementById('btn-add').addEventListener('click', manualAdd);
+    document.getElementById('manual-name').addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') manualAdd();
+    });
+
+    // Keyboard: H to toggle panel
+    window.addEventListener('keydown', (e) => {
+      if (e.key === 'h' || e.key === 'H') {
+        uiPanel.classList.toggle('hidden');
+      }
+    });
+
+    // ---------- Init ----------
+    window.addEventListener('resize', resize);
+    resize();
+    requestAnimationFrame(loop);
+
+    // Auto-demo if no channel for quick preview
+    setTimeout(() => {
+      if (players.size === 0 && !kickWs) {
+        setStatus('İpucu: Demo Modu ile hemen test edebilirsin veya kanal bağla.', 'warn');
+      }
+    }, 1500);
+  </script>
+</body>
+</html>
